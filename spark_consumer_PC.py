@@ -2,22 +2,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, avg, count
 from pyspark.sql.types import StructType, StringType, DoubleType, IntegerType
 
-# Μπορειτε να χρησιμοποιειτε παρενθέσεις ( ... ) γύρω από μπλοκ κώδικα για να επιτρέψετε αλλαγή γραμμής (multi-line statement) χωρίς να χρειάζεται να χρησιμοποιείτε τον χαρακτήρα backslash \
-
-
 # 1. Ορισμός του Schema
-## vehicles_to_pandas returns a pd.DataFrame:
-#             A DataFrame containing the travel logs of vehicles, with the columns:
-#
-#             - 'name': the name of the vehicle (platoon).
-#             - 'dn': the platoon size.
-#             - 'orig': the origin node of the vehicle's trip.
-#             - 'dest': the destination node of the vehicle's trip.
-#             - 't': the timestep.
-#             - 'link': the link the vehicle is on (or relevant status).
-#             - 'x': the position of the vehicle on the link.
-#             - 's': the spacing of the vehicle.
-#             - 'v': the speed of the vehicle.
 schema = StructType() \
     .add("name", StringType()) \
     .add("dn", IntegerType()) \
@@ -29,7 +14,6 @@ schema = StructType() \
     .add("s", DoubleType()) \
     .add("v", DoubleType())
 
-
 # 2. Δημιουργία Spark Session
 spark = (
     SparkSession.builder
@@ -40,7 +24,6 @@ spark = (
 )
 
 # 3. Σύνδεση στον Redpanda (Kafka-compatible)
-# Μπορείτε να αντικαταστήσετε το 'uxsim' με όνομα του topic της επιλογής σας
 df = (
     spark.readStream
     .format("kafka")
@@ -50,36 +33,65 @@ df = (
     .load()
 )
 
-# 4. Parsing του JSON και Μετασχηματισμός
-# Χρησιμοποιείστε "cast" για να μετατρεψετε τις raw binary τιμες σε ευαναγνωστο JSON string
-# Εφαρμοστε το schema στο string, δημιουργώντας ενα μοναδικό struct με την ονομασία data
-# Καθε key το JSON (name, orig, dest, etc.) μετατρεπεται σε ξεχωριστη στήλη στο DataFrame.
-# parsed = df.select ...
+# ==============================================================================
+# ΣΥΜΠΛΗΡΩΣΗ ΚΩΔΙΚΑ: 4. Parsing του JSON και Μετασχηματισμός
+# Εδώ μετατρέπουμε τα δυαδικά δεδομένα (binary) του Kafka σε αναγνώσιμες στήλες
+# ==============================================================================
+parsed = df.select(
+    from_json(col("value").cast("string"), schema).alias("data")
+).select("data.*")
+# ==============================================================================
 
-# 5. Υπολογισμός Στατιστικών ανά Ακμή (link) και Χρόνο (t)
-# t = time από την εξομοίωση, v = ταχύτητα οχήματος
-# Στον παρακάτω κώδικα χρησιμοποιούμε το πεδίο t της UXsim ως "time". Αν η εξομοίωση στέλνει δεδομένα πολύ γρήγορα, το Spark θα τα ομαδοποιεί σωστά ανά simulation step.
-# stats = parsed.  ....
+# ==============================================================================
+# ΣΥΜΠΛΗΡΩΣΗ ΚΩΔΙΚΑ: 5. Υπολογισμός Στατιστικών ανά Ακμή (link) και Χρόνο (t)
+# Ομαδοποιούμε τα δεδομένα ανά χρόνο και δρόμο για να βρούμε πλήθος και μέση ταχύτητα
+# ==============================================================================
+stats = (
+    parsed.groupBy("t", "link")
+    .agg(
+        count("*").alias("vcount"),
+        avg("v").alias("vspeed")
+    )
+)
+# ==============================================================================
 
+# ==============================================================================
+# ΣΥΜΠΛΗΡΩΣΗ ΚΩΔΙΚΑ: 6α. Αποθήκευση στη MongoDB των αρχικών δεδομένων (Raw)
+# Αποθηκεύουμε κάθε εγγραφή όπως έρχεται στη συλλογή 'raw_data'
+# ==============================================================================
+query_raw = (
+    parsed.writeStream
+    .format("mongodb")
+    .option("checkpointLocation", "/tmp/checkpoint_raw")
+    .option("spark.mongodb.write.database", "traffic")
+    .option("spark.mongodb.write.collection", "raw_data")
+    .outputMode("append")
+    .start()
+)
+# ==============================================================================
 
-# 6α. Αποθήκευση στη MongoDB των αρχικών δεδομενων
-# parsed.writeStream ...
-    
-
-# 6β. Αποθήκευση στη MongoDB των επεξεργασμενων δεδομενων
-# Το outputMode("append") στο streaming απαιτεί τη χρήση Watermarks (χρονικά όρια) για να ξέρει το Spark πότε "έκλεισε" ένα group και μπορεί να το γράψει.
-# Διαφορετικά, χρησιμοποιούμε το .outputMode("update"), το οποίο γράφει στη MongoDB μόνο τα links που άλλαξαν οι τιμές τους.
+# ==============================================================================
+# ΣΥΜΠΛΗΡΩΣΗ ΚΩΔΙΚΑ: 6β. Αποθήκευση στη MongoDB των επεξεργασμένων δεδομένων (Stats)
+# Χρησιμοποιούμε 'update' mode γιατί τα στατιστικά αλλάζουν καθώς έρχονται νέα δεδομένα
+# ==============================================================================
 query_mongo = (
     stats.writeStream
-     ...
-    )
+    .format("mongodb")
+    .option("checkpointLocation", "/tmp/checkpoint_stats")
+    .option("spark.mongodb.write.database", "traffic")
+    .option("spark.mongodb.write.collection", "stats")
+    .outputMode("update")
+    .start()
+)
+# ==============================================================================
 
 # 7. Προβολή στην κονσόλα για debugging (προαιρετικά)
 query_console = (
     stats.writeStream
-     ...
-    )
-
+    .format("console")
+    .outputMode("update")
+    .start()
+)
 
 # Αναμονή για τον τερματισμό όλων των queries
-spark.streams.awaitAnyTermination() # query_mongo.awaitTermination()
+spark.streams.awaitAnyTermination()
