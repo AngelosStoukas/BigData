@@ -52,6 +52,7 @@ services:
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v23.3.10
     container_name: redpanda
+    user: root
     command:
       - redpanda
       - start
